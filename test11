@@ -1,0 +1,175 @@
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
+ 
+// Define an interface for the request handler object
+interface RequestHandler {
+  resolve: (request: AxiosRequestConfig) => void;
+}
+ 
+// Define a class for the rate limit instance
+class AxiosRateLimit {
+  // Declare the properties and their types
+  queue: RequestHandler[];
+  timeslotRequests: number;
+  interceptors: {
+    request: number | null;
+    response: number | null;
+  };
+  perMilliseconds: number;
+  maxRequests: number;
+  timeoutId: NodeJS.Timeout | null;
+ 
+  // Define the constructor with a parameter of type AxiosInstance
+  constructor(axios: AxiosInstance) {
+    this.queue = [];
+    this.timeslotRequests = 0;
+    this.interceptors = {
+      request: null,
+      response: null,
+    };
+    this.perMilliseconds = 0;
+    this.maxRequests = 0;
+    this.timeoutId = null;
+ 
+    // Bind the methods to this instance
+    this.handleRequest = this.handleRequest.bind(this);
+    this.handleResponse = this.handleResponse.bind(this);
+ 
+    // Enable the interceptors on the axios instance
+    this.enable(axios);
+  }
+ 
+  // Define a method to get the maximum requests per second
+  getMaxRPS(): number {
+    const perSeconds = this.perMilliseconds / 1000;
+    return this.maxRequests / perSeconds;
+  }
+ 
+  // Define a method to set the maximum requests per second
+  setMaxRPS(rps: number): void {
+    this.setRateLimitOptions({
+      maxRequests: rps,
+      perMilliseconds: 1000,
+    });
+  }
+ 
+  // Define a method to set the rate limit options
+  setRateLimitOptions(options: {
+    maxRequests: number;
+    perMilliseconds: number;
+    maxRPS?: number;
+  }): void {
+    if (options.maxRPS) {
+      this.setMaxRPS(options.maxRPS);
+    } else {
+      this.perMilliseconds = options.perMilliseconds;
+      this.maxRequests = options.maxRequests;
+    }
+  }
+ 
+  // Define a method to enable the interceptors
+  enable(axios: AxiosInstance): void {
+    // Define a function to handle errors
+    function handleError(error: any): Promise<never> {
+      return Promise.reject(error);
+    }
+ 
+    // Set the request and response interceptors
+    this.interceptors.request = axios.interceptors.request.use(
+      this.handleRequest,
+      handleError
+    );
+    this.interceptors.response = axios.interceptors.response.use(
+      this.handleResponse,
+      handleError
+    );
+  }
+ 
+  // Define a method to handle requests
+  handleRequest(request: AxiosRequestConfig): Promise<AxiosRequestConfig> {
+    return new Promise((resolve) => {
+      this.push({ resolve: () => resolve(request) });
+    });
+  }
+ 
+  // Define a method to handle responses
+  handleResponse(response: AxiosResponse): AxiosResponse {
+    this.shift();
+    return response;
+  }
+ 
+  // Define a method to push a request handler to the queue
+  push(requestHandler: RequestHandler): void {
+    this.queue.push(requestHandler);
+    this.shiftInitial();
+  }
+ 
+  // Define a method to shift the first request handler from the queue
+  shiftInitial(): void {
+    setTimeout(() => this.shift(), 0);
+  }
+ 
+  // Define a method to shift a request handler from the queue
+  shift(): void {
+    // If the queue is empty, return
+    if (!this.queue.length) return;
+ 
+    // If the timeslot requests reached the maximum, return
+    if (this.timeslotRequests === this.maxRequests) {
+      // If the timeout id has a ref method, call it
+      if (this.timeoutId && typeof this.timeoutId.ref === 'function') {
+        this.timeoutId.ref();
+      }
+ 
+      return;
+    }
+ 
+    // Dequeue the first request handler and resolve it
+    const queued = this.queue.shift();
+    queued!.resolve();
+ 
+    // If the timeslot requests is zero, set a timeout to reset it
+    if (this.timeslotRequests === 0) {
+      this.timeoutId = setTimeout(() => {
+        this.timeslotRequests = 0;
+        this.shift();
+      }, this.perMilliseconds);
+ 
+      // If the timeout id has an unref method, call it if the queue is empty
+      if (typeof this.timeoutId.unref === 'function') {
+        if (this.queue.length === 0) this.timeoutId.unref();
+      }
+    }
+ 
+    // Increment the timeslot requests
+    this.timeslotRequests += 1;
+  }
+}
+ 
+// Define a function to apply rate limit to an axios instance
+function axiosRateLimit(
+  axios: AxiosInstance,
+  options: {
+    maxRequests: number;
+    perMilliseconds: number;
+    maxRPS?: number;
+  }
+): AxiosInstance {
+  // Create a new rate limit instance
+  const rateLimitInstance = new AxiosRateLimit(axios);
+ 
+  // Set the rate limit options
+  rateLimitInstance.setRateLimitOptions(options);
+ 
+  // Add the methods to the axios instance
+  axios.getMaxRPS = rateLimitInstance.getMaxRPS.bind(rateLimitInstance);
+  axios.setMaxRPS = rateLimitInstance.setMaxRPS.bind(rateLimitInstance);
+  axios.setRateLimitOptions = rateLimitInstance.setRateLimitOptions.bind(
+    rateLimitInstance
+  );
+ 
+  // Return the axios instance
+  return axios;
+}
+ 
+// Export the function
+export default axiosRateLimit;
